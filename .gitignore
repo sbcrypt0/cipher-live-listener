@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+build/
+
+# secrets: API keys live in .env.local and must never be committed
+.env*
+!.env.local.example
+
+# TypeScript / Next.js generated
+*.tsbuildinfo
+next-env.d.ts
+
+# misc
+.DS_Store
+*.log
