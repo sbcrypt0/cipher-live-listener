@@ -1,6 +1,14 @@
 "use client";
 
-import { useScribe, type TranscriptSegment } from "@elevenlabs/react";
+import { useScribe } from "@elevenlabs/react";
+import {
+  enableDiarization,
+  listenForSpeakers,
+  speakerLabel,
+  toSpeakerRuns,
+  type DiarizedWord,
+  type SpeakerRun,
+} from "./lib/diarization";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type GateResult = {
@@ -31,17 +39,95 @@ const DIRECT_ADDRESS_DEBOUNCE_MS = 800;
 const FORCE_COMMIT_MS = 6000;
 const WAKE_WORD_PATTERN = /\b[cs][iy](?:ph|f)er\b/i;
 
+// Label who said what (needs scribe_v3_live). Set to false to switch it off,
+// e.g. if you need ElevenLabs' background-noise filter, which can't be used
+// at the same time as speaker labels.
+const ENABLE_DIARIZATION = true;
+
+/** One finalised line of transcript. */
+type Segment = {
+  id: string;
+  text: string;
+  timestamp: number; // seconds
+  segmentIndex?: number; // ElevenLabs' number for this line, links it to its speaker labels
+};
+
+type Line = { speaker?: string | null; text: string };
+
+const SPEAKER_COLOURS = [
+  "text-sky-300",
+  "text-amber-300",
+  "text-fuchsia-300",
+  "text-lime-300",
+  "text-rose-300",
+  "text-teal-300",
+];
+
+function speakerColour(speaker: string | null): string {
+  if (!speaker) return "text-neutral-400";
+  const n = Number(speaker.replace(/\D/g, ""));
+  return SPEAKER_COLOURS[(Number.isFinite(n) ? n : 0) % SPEAKER_COLOURS.length];
+}
+
+/** Speaker runs for a line, or null if its labels haven't arrived (yet). */
+function runsFor(
+  segment: Segment,
+  words: Record<number, DiarizedWord[]>,
+  merges: Record<string, string>
+): SpeakerRun[] | null {
+  if (segment.segmentIndex === undefined) return null;
+  const w = words[segment.segmentIndex];
+  if (!w) return null;
+  const runs = toSpeakerRuns(w, merges);
+  return runs.length > 0 ? runs : null;
+}
+
+/**
+ * Turn transcript lines into the text Cipher reads, e.g.
+ *   Speaker 1: Is Python faster than C#?
+ *   Speaker 2: No, C# is usually faster.
+ * Lines without labels are passed through as plain text.
+ */
+function toWindowText(
+  segments: Segment[],
+  words: Record<number, DiarizedWord[]>,
+  merges: Record<string, string>
+): string {
+  const lines: Line[] = [];
+  for (const seg of segments) {
+    const runs = runsFor(seg, words, merges);
+    const parts: Line[] = runs ?? [{ text: seg.text }];
+    for (const part of parts) {
+      const last = lines[lines.length - 1];
+      // Join back-to-back lines from the same labelled speaker.
+      if (last && part.speaker !== undefined && last.speaker === part.speaker) {
+        last.text += " " + part.text;
+      } else {
+        lines.push({ ...part });
+      }
+    }
+  }
+  return lines
+    .map((l) => (l.speaker !== undefined ? `${speakerLabel(l.speaker)}: ${l.text}` : l.text))
+    .join("\n")
+    .trim();
+}
+
 export default function Home() {
-  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [posts, setPosts] = useState<GateResult[]>([]);
   const [log, setLog] = useState<GateResult[]>([]);
   const [gateBusy, setGateBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Speaker labels, keyed by ElevenLabs' line number (segment_index).
+  const [wordsBySegment, setWordsBySegment] = useState<Record<number, DiarizedWord[]>>({});
+  // "speaker_2 turned out to be speaker_0" corrections from ElevenLabs.
+  const [merges, setMerges] = useState<Record<string, string>>({});
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCallAtRef = useRef<number>(0);
   const lastCommitAtRef = useRef<number>(Date.now());
-  const segmentsRef = useRef<TranscriptSegment[]>([]);
+  const segmentsRef = useRef<Segment[]>([]);
   const postsRef = useRef<GateResult[]>([]);
 
   useEffect(() => {
@@ -51,6 +137,16 @@ export default function Home() {
   useEffect(() => {
     postsRef.current = posts;
   }, [posts]);
+
+  const wordsRef = useRef<Record<number, DiarizedWord[]>>({});
+  const mergesRef = useRef<Record<string, string>>({});
+  const stopSpeakersRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    wordsRef.current = wordsBySegment;
+  }, [wordsBySegment]);
+  useEffect(() => {
+    mergesRef.current = merges;
+  }, [merges]);
 
   const runGate = useCallback(async (opts?: { directAddress?: boolean }) => {
     const directAddress = opts?.directAddress ?? false;
@@ -63,11 +159,11 @@ export default function Home() {
     lastCallAtRef.current = now;
 
     const cutoff = now / 1000 - WINDOW_SECONDS;
-    const windowText = segmentsRef.current
-      .filter((s) => s.timestamp >= cutoff)
-      .map((s) => s.text)
-      .join(" ")
-      .trim();
+    const windowText = toWindowText(
+      segmentsRef.current.filter((s) => s.timestamp >= cutoff),
+      wordsRef.current,
+      mergesRef.current
+    );
 
     if (!windowText) return;
 
@@ -114,7 +210,8 @@ export default function Home() {
           id: `${Date.now()}-${Math.random()}`,
           text: data.text,
           timestamp: Date.now() / 1000,
-          isFinal: true,
+          // Only present when speaker labels are on.
+          segmentIndex: (data as { segment_index?: number }).segment_index,
         },
       ]);
       // A direct address ("hey cipher, ...") jumps the queue: short debounce,
@@ -165,13 +262,33 @@ export default function Home() {
       const res = await fetch("/api/scribe-token");
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+
+      // ElevenLabs numbers lines and speakers from 0 again in every session,
+      // so each Start begins a fresh transcript to keep labels matched up.
+      stopSpeakersRef.current();
+      setSegments([]);
+      setWordsBySegment({});
+      setMerges({});
+
+      if (ENABLE_DIARIZATION) enableDiarization();
       await scribe.connect({ token: data.token });
+
+      if (ENABLE_DIARIZATION) {
+        stopSpeakersRef.current = listenForSpeakers(scribe.getConnection(), {
+          onDiarized: (segmentIndex, words) =>
+            setWordsBySegment((prev) => ({ ...prev, [segmentIndex]: words })),
+          onSpeakersMerged: (from, to) =>
+            setMerges((prev) => ({ ...prev, [from]: to })),
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to start");
     }
   };
 
   const stop = () => {
+    stopSpeakersRef.current();
+    stopSpeakersRef.current = () => {};
     scribe.disconnect();
     if (debounceRef.current) clearTimeout(debounceRef.current);
   };
@@ -264,9 +381,22 @@ export default function Home() {
           </h2>
           <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-3 max-h-32 overflow-y-auto text-xs text-neutral-400 space-y-1">
             {segments.length === 0 && <p className="text-neutral-600">…</p>}
-            {segments.map((s) => (
-              <p key={s.id}>{s.text}</p>
-            ))}
+            {segments.map((s) => {
+              const runs = runsFor(s, wordsBySegment, merges);
+              if (!runs) return <p key={s.id}>{s.text}</p>;
+              return (
+                <p key={s.id}>
+                  {runs.map((r, i) => (
+                    <span key={i}>
+                      <span className={`font-semibold ${speakerColour(r.speaker)}`}>
+                        {speakerLabel(r.speaker)}:
+                      </span>{" "}
+                      {r.text}{" "}
+                    </span>
+                  ))}
+                </p>
+              );
+            })}
             {scribe.partialTranscript && (
               <p className="text-neutral-500 italic">{scribe.partialTranscript}</p>
             )}

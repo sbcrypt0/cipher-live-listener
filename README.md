@@ -11,8 +11,8 @@ The aim is to make sessions more useful for the people who attend.
 ## How it works
 
 ```
-mic → ElevenLabs Scribe v3 Live (live speech-to-text)
-    → rolling 30-second transcript window
+mic → ElevenLabs Scribe v3 Live (live speech-to-text + speaker labels)
+    → rolling 30-second transcript window, e.g. "Speaker 1: ..." / "Speaker 2: ..." 
     → "the gate": Claude decides should_post (yes/no) + message + reason
     → shown on the page, with every decision logged (including "stayed quiet")
 ```
@@ -26,6 +26,7 @@ for *when to speak* can be inspected, explained and tuned.
 | --- | --- |
 | Mic capture + live transcription | `app/page.tsx` (ElevenLabs `useScribe` hook) |
 | Short-lived ElevenLabs token (keeps the real key on the server) | `app/api/scribe-token/route.ts` |
+| Speaker labels (diarization) added around the ElevenLabs SDK | `app/lib/diarization.ts` |
 | The gate: Cipher's instructions and the Claude call | `app/api/gate/route.ts` |
 
 ### When Cipher speaks
@@ -35,6 +36,24 @@ for *when to speak* can be inspected, explained and tuned.
   also matches common transcription spellings (Cypher, Sypher, Cifer, Syfer),
   and it responds after ~0.8s instead of the usual ~3s pause.
 - Answers are kept to 2–3 sentences so they can be skimmed in a live room.
+
+### Who said what (speaker labels)
+Scribe v3 Live can label each word with a speaker ("speaker 0", "speaker 1"...),
+which ElevenLabs calls **diarization**. Their JS/React SDK doesn't support it
+yet, so `app/lib/diarization.ts` adds it without replacing the SDK:
+- it adds `diarize=true` to the connection address the SDK builds, and
+- it listens on the same connection for the `diarized_transcript` and
+  `speakers_merged` messages the SDK ignores.
+
+Each finalised line is matched to its labels by `segment_index`. When
+ElevenLabs decides two speaker IDs were the same person, earlier lines are
+re-labelled. Cipher sees the window as "Speaker 1: ...", "Speaker 2: ..." lines,
+so it can tell when a question has already been answered or two people
+disagree. Labels are anonymous; they're never turned into names.
+
+Switch it off with `ENABLE_DIARIZATION = false` in `app/page.tsx`. Each press
+of **Start listening** begins a fresh transcript, because ElevenLabs restarts
+its line and speaker numbers every session.
 
 ### Timing
 - After a natural pause (~3s), the latest 30 seconds of transcript go to the gate.
@@ -70,8 +89,10 @@ Open http://localhost:3000, click **Start listening** and allow mic access.
 ## Known limitations / next steps
 - **Room audio:** a laptop mic isn't enough for a whole table. A USB
   conference speakerphone is the likely fix.
-- **Background noise filter:** ElevenLabs offers one, but the React hook used
-  here doesn't expose it yet.
+- **Background noise filter:** ElevenLabs offers one, but it can't be used at
+  the same time as speaker labels, and the React hook doesn't expose it yet.
+- **Speaker labels** are best-effort: they can be missing for the first moment
+  of a line, wrong when voices are similar, and revised later.
 - **Output:** posts to this page only. Discord integration comes later.
 - **Memory:** Cipher only sees the last ~30 seconds of conversation.
 - Text only, no spoken replies.
