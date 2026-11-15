@@ -11,7 +11,7 @@ The aim is to make sessions more useful for the people who attend.
 ## How it works
 
 ```
-mic → ElevenLabs Scribe v2 (live speech-to-text)
+mic → ElevenLabs Scribe v3 Live (live speech-to-text)
     → rolling 30-second transcript window
     → "the gate": Claude decides should_post (yes/no) + message + reason
     → shown on the page, with every decision logged (including "stayed quiet")

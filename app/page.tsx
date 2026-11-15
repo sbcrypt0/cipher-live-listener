@@ -99,7 +99,7 @@ export default function Home() {
 
   const scribe = useScribe({
     autoConnect: false,
-    modelId: "scribe_v2_realtime",
+    modelId: "scribe_v3_live",
     // Always transcribe as English; auto-detect sometimes mistakes short
     // clips (e.g. "Cipher") for another language.
     languageCode: "en",
