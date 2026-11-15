@@ -7,28 +7,53 @@ export async function GET() {
   if (!process.env.ELEVENLABS_API_KEY) {
     return NextResponse.json(
       { error: "ELEVENLABS_API_KEY not set on the server" },
-      { status: 500 }
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 
-  const response = await fetch(
-    "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": process.env.ELEVENLABS_API_KEY,
-      },
+  try {
+    const response = await fetch(
+      "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          error: `ElevenLabs token request failed (${response.status})`,
+        },
+        { status: 502, headers: { "Cache-Control": "no-store" } }
+      );
     }
-  );
 
-  if (!response.ok) {
-    const detail = await response.text();
+    const data = await response.json();
+    if (!data || typeof data.token !== "string" || !data.token.trim()) {
+      return NextResponse.json(
+        { error: "Invalid token response from ElevenLabs" },
+        { status: 502, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     return NextResponse.json(
-      { error: `ElevenLabs token request failed: ${response.status} ${detail}` },
-      { status: 502 }
+      { token: data.token },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    console.error("scribe-token error", err);
+    return NextResponse.json(
+      {
+        error:
+          err instanceof Error
+            ? err.message
+            : "ElevenLabs token request failed",
+      },
+      { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
-
-  const data = await response.json();
-  return NextResponse.json({ token: data.token });
 }

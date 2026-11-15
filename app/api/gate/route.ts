@@ -16,7 +16,9 @@ const AGENT_NAME = "Cipher";
 const SYSTEM_PROMPT = `Your name is ${AGENT_NAME}. You are a quiet, occasionally-useful \
 participant listening in on a live group conversation at a tech meetup. \
 You see a rolling window of the last things said (a live transcript, may \
-contain STT errors and half-sentences).
+contain STT errors, half-sentences, and segment/speaker tags such as \
+"[seg-1 · Speaker 1 (speaker_0)]:", "[seg-2 · You (typed)]:", or "[seg-3]" \
+when speaker diarization or manual input is used).
 
 Almost all the time you should say NOTHING. Only speak up when you have \
 something a thoughtful, well-informed person in the room would actually \
@@ -46,6 +48,8 @@ Respond ONLY with JSON, no other text:
 "reason" is a short internal note on why you did or didn't post (not shown \
 to the room). "message" is empty string when should_post is false.`;
 
+const MAX_WINDOW_CHARS = 12000;
+
 export async function POST(req: NextRequest) {
   try {
     const { transcriptWindow, recentPosts, directAddress } = await req.json();
@@ -64,10 +68,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const boundedWindow = transcriptWindow.slice(-MAX_WINDOW_CHARS);
+
     const priorContext =
       Array.isArray(recentPosts) && recentPosts.length > 0
         ? `\n\nThings you already posted recently (don't repeat yourself):\n${recentPosts
-            .map((p: string) => `- ${p}`)
+            .slice(-5)
+            .filter((p: unknown): p is string => typeof p === "string")
+            .map((p: string) => `- ${p.slice(0, 500)}`)
             .join("\n")}`
         : "";
 
@@ -78,7 +86,7 @@ export async function POST(req: NextRequest) {
       messages: [
         {
           role: "user",
-          content: `${directAddress ? "[DIRECT ADDRESS] " : ""}Recent transcript window:\n"""\n${transcriptWindow}\n"""${priorContext}`,
+          content: `${directAddress ? "[DIRECT ADDRESS] " : ""}Recent transcript window:\n"""\n${boundedWindow}\n"""${priorContext}`,
         },
       ],
     });
@@ -86,23 +94,38 @@ export async function POST(req: NextRequest) {
     const textBlock = response.content.find((b) => b.type === "text");
     const raw = textBlock && "text" in textBlock ? textBlock.text : "{}";
 
-    let parsed: { should_post: boolean; message: string; reason?: string };
+    let shouldPost = false;
+    let message = "";
+    let reason = "";
+
     try {
       // Take just the {...} part, in case the reply has extra text or code fences.
       const start = raw.indexOf("{");
       const end = raw.lastIndexOf("}");
       if (start === -1 || end <= start) throw new Error("no JSON object");
-      parsed = JSON.parse(raw.slice(start, end + 1));
+      const parsed = JSON.parse(raw.slice(start, end + 1)) as Record<
+        string,
+        unknown
+      >;
+      message =
+        typeof parsed.message === "string" ? parsed.message.trim() : "";
+      reason = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+      shouldPost = parsed.should_post === true && message.length > 0;
+      if (!shouldPost) {
+        message = "";
+      }
     } catch {
       console.error("gate: unparseable model output:", raw);
-      parsed = {
-        should_post: false,
-        message: "",
-        reason: `unparseable model output: ${raw.slice(0, 200)}`,
-      };
+      shouldPost = false;
+      message = "";
+      reason = `unparseable model output: ${raw.slice(0, 200)}`;
     }
 
-    return NextResponse.json(parsed);
+    return NextResponse.json({
+      should_post: shouldPost,
+      message,
+      reason,
+    });
   } catch (err) {
     console.error("gate error", err);
     return NextResponse.json(
