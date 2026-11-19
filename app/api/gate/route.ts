@@ -102,7 +102,8 @@ export async function POST(req: NextRequest) {
       if (start === -1 || end <= start) throw new Error("no JSON object");
       parsed = JSON.parse(raw.slice(start, end + 1));
     } catch {
-      console.error("gate: unparseable model output:", raw);
+      // Log only the length: the reply can quote what people said.
+      console.error(`gate: unparseable model output (${raw.length} characters)`);
       parsed = {
         should_post: false,
         message: "",

@@ -53,6 +53,25 @@ export function enableDiarization() {
     url.searchParams.set("diarize", "true");
     return url.toString();
   };
+
+  // The SDK prints every message type it doesn't recognise to the console,
+  // with the full transcript text inside. Swallow just the two speaker-label
+  // messages, so what people say never ends up in the console or in any log
+  // that copies the console.
+  const originalWarn = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    const [first, data] = args as [unknown, { message_type?: string } | undefined];
+    if (
+      typeof first === "string" &&
+      first.startsWith("Unknown message type") &&
+      (data?.message_type === "diarized_transcript" ||
+        data?.message_type === "speakers_merged")
+    ) {
+      return;
+    }
+    originalWarn(...args);
+  };
+
   patched = true;
 }
 
